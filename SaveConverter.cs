@@ -1,15 +1,16 @@
 // LEGO Dimensions save converter
 // Xbox 360 (xenia) <-> PS3 (RPCS3) <-> PS4 (shadPS4) <-> Wii U (Cemu)
 //
-// Every platform stores the same 24-byte header followed by an opaque payload:
+// Every platform stores the same 24-byte header followed by a payload:
 //   u32 version   u32 sigA   u32 zero   u32 sigB (0x502C3F10)   u32 checksum   u32 length
 // The header dwords use the console's native byte order. On the PowerPC consoles
 // sigA is simply sigB + version (checked against versions 1, 12 and 13); the PS4
 // uses its own constant instead.
 //
-// The payload is carried across untouched, so the checksum never needs recomputing.
-// The save VERSION is preserved as well - this tool moves a save between platforms,
-// it does not upgrade one save revision to another.
+// The payload is otherwise identical between platforms, with one exception: the
+// PS4 main blob carries 8 extra zero bytes at payload offset 1080, shifting
+// everything after it. Those are stripped on read and re-inserted on write, so
+// the rest of the tool works on one canonical layout.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -39,10 +40,13 @@ public class Rec {
     public string Logical;      // MAIN / LEGACY / DLC:<n> / OPT:<base>
     public uint Version;
     public uint Checksum;
-    public byte[] Payload;
+    public byte[] Payload;      // always in canonical (non-PS4) layout
 }
 
 public static class Conv {
+    public const int PS4_GAP_OFF = 1080;    // PS4 inserts 8 zero bytes here in GAME / V2GAME
+    public const int PS4_GAP_LEN = 8;
+
     public static bool IsBE(Plat p) { return p != Plat.PS4; }
     public static bool Pads(Plat p) { return p == Plat.PS3; }   // PS3 rounds files up to 1 KiB
     public static bool ZeroBased(Plat p) { return p == Plat.WiiU; }
@@ -52,12 +56,31 @@ public static class Conv {
         return Fmt.SIG_A_PS4_V13;                               // only known for version 13
     }
 
-    // Fallback payload length for GAME0/GAME01 when the source has no such file (PS3).
-    public static int LegacyLen(Plat p) {
-        if (p == Plat.X360) return 100417;
-        if (p == Plat.PS4)  return 100425;
-        if (p == Plat.WiiU) return 100381;
-        return -1;                                              // PS3 keeps only the full blob
+    // Canonical GAME payload length per save revision; GAME is a prefix of V2GAME.
+    public static int LegacyLen(uint version) {
+        if (version == 13) return 100417;
+        if (version == 12) return 100381;
+        return -1;
+    }
+
+    static bool IsGameBlob(string logical) { return logical == "MAIN" || logical == "LEGACY"; }
+
+    static byte[] StripGap(byte[] p, out bool wasZero) {
+        wasZero = true;
+        if (p.Length < PS4_GAP_OFF + PS4_GAP_LEN) return p;
+        for (int i = 0; i < PS4_GAP_LEN; i++) if (p[PS4_GAP_OFF + i] != 0) wasZero = false;
+        byte[] o = new byte[p.Length - PS4_GAP_LEN];
+        Array.Copy(p, 0, o, 0, PS4_GAP_OFF);
+        Array.Copy(p, PS4_GAP_OFF + PS4_GAP_LEN, o, PS4_GAP_OFF, p.Length - PS4_GAP_OFF - PS4_GAP_LEN);
+        return o;
+    }
+
+    static byte[] InsertGap(byte[] p) {
+        if (p.Length < PS4_GAP_OFF) return p;
+        byte[] o = new byte[p.Length + PS4_GAP_LEN];
+        Array.Copy(p, 0, o, 0, PS4_GAP_OFF);
+        Array.Copy(p, PS4_GAP_OFF, o, PS4_GAP_OFF + PS4_GAP_LEN, p.Length - PS4_GAP_OFF);
+        return o;
     }
 
     static readonly Regex AnyName =
@@ -106,11 +129,10 @@ public static class Conv {
         return Plat.X360;
     }
 
-    public static List<Rec> Read(string dir, Plat src, bool withOptions) {
+    public static List<Rec> Read(string dir, Plat src, bool withOptions, Action<string> log) {
         var recs = new List<Rec>();
         bool zero = ZeroBased(src);
-        string v2 = zero ? "V2GAME0" : "V2GAME01";
-        bool hasV2 = File.Exists(Path.Combine(dir, v2));
+        bool hasV2 = File.Exists(Path.Combine(dir, zero ? "V2GAME0" : "V2GAME01"));
         foreach (string f in Directory.GetFiles(dir)) {
             string n = Path.GetFileName(f);
             Match m = AnyName.Match(n);
@@ -131,12 +153,21 @@ public static class Conv {
                 int idx = int.Parse(m.Groups[2].Value);
                 r.Logical = "DLC:" + (zero ? idx + 1 : idx);                 // canonical index is 1-based
             } else r.Logical = "OPT:" + bas;
+
+            if (src == Plat.PS4 && IsGameBlob(r.Logical)) {
+                bool wasZero;
+                r.Payload = StripGap(r.Payload, out wasZero);
+                if (log != null && !wasZero)
+                    log("WARNING: the 8 bytes at offset " + PS4_GAP_OFF + " of " + n +
+                        " were not zero; removing them anyway.");
+            }
             recs.Add(r);
         }
         return recs;
     }
 
-    static byte[] Build(Plat tgt, uint version, uint checksum, byte[] payload) {
+    static byte[] Build(Plat tgt, string logical, uint version, uint checksum, byte[] payload) {
+        if (tgt == Plat.PS4 && IsGameBlob(logical)) payload = InsertGap(payload);
         int exact = Fmt.HDR + payload.Length;
         int total = Pads(tgt) ? ((exact + 1023) / 1024) * 1024 : exact;
         byte[] o = new byte[total];
@@ -169,11 +200,8 @@ public static class Conv {
     public static void Write(string outDir, Plat tgt, List<Rec> recs, Action<string> log) {
         Directory.CreateDirectory(outDir);
         string bak = Path.Combine(outDir, "_backup_");
-        Rec main = null, legacy = null;
-        foreach (Rec r in recs) {
-            if (r.Logical == "MAIN") main = r;
-            if (r.Logical == "LEGACY") legacy = r;
-        }
+        Rec main = null;
+        foreach (Rec r in recs) if (r.Logical == "MAIN") main = r;
         if (main == null) throw new Exception("The source folder has no main save file (GAME / V2GAME).");
 
         if (tgt == Plat.PS4 && main.Version != 13)
@@ -184,17 +212,16 @@ public static class Conv {
         foreach (Rec r in recs) if (r.Logical != "LEGACY") plan.Add(r);
 
         // GAME is the first N bytes of V2GAME sharing its checksum, so it is rebuilt from
-        // the main blob. Its length follows the source when the source had one, because
-        // that length belongs to the save's own version.
-        if (LegacyLen(tgt) > 0) {
-            int want = legacy != null ? legacy.Payload.Length : LegacyLen(tgt);
-            int n = Math.Min(want, main.Payload.Length);
+        // the main blob at the length this save revision uses.
+        int lg = LegacyLen(main.Version);
+        if (lg > 0 && tgt != Plat.PS3) {
+            int n = Math.Min(lg, main.Payload.Length);
             var leg = new Rec();
             leg.Logical = "LEGACY"; leg.Version = main.Version; leg.Checksum = main.Checksum;
             leg.Payload = new byte[n];
             Array.Copy(main.Payload, 0, leg.Payload, 0, n);
             plan.Add(leg);
-            log("GAME rebuilt from the main blob: " + n + " bytes of payload");
+            log("GAME rebuilt from the main blob: " + n + " bytes of canonical payload");
         }
 
         int written = 0;
@@ -206,7 +233,7 @@ public static class Conv {
                 Directory.CreateDirectory(bak);
                 File.Copy(dst, Path.Combine(bak, name), true);
             }
-            File.WriteAllBytes(dst, Build(tgt, r.Version, r.Checksum, r.Payload));
+            File.WriteAllBytes(dst, Build(tgt, r.Logical, r.Version, r.Checksum, r.Payload));
             written++;
         }
         log("files written: " + written + " (save version " + main.Version + " preserved)");
@@ -278,7 +305,7 @@ class MainForm : Form {
         try {
             List<string> notes;
             Plat p = Conv.Detect(src.Text, out notes);
-            int n = Conv.Read(src.Text, p, false).Count;
+            int n = Conv.Read(src.Text, p, false, null).Count;
             det.Text = "Detected: " + Human(p) + " - " + string.Join(", ", notes.ToArray()) + "; data files: " + n;
             det.ForeColor = Color.FromArgb(0, 110, 0);
         } catch (Exception ex) {
@@ -309,8 +336,10 @@ class MainForm : Form {
             Say("Target: " + Human(t));
             if (s == t) Say("NOTE: source and target are the same platform, so files are just rewritten.");
 
-            List<Rec> recs = Conv.Read(src.Text, s, opts.Checked);
+            List<Rec> recs = Conv.Read(src.Text, s, opts.Checked, Say);
             Say("Files read: " + recs.Count);
+            if (s == Plat.PS4 && t != Plat.PS4) Say("Removed the 8-byte PS4 gap from the main save blob.");
+            if (t == Plat.PS4 && s != Plat.PS4) Say("Inserted the 8-byte PS4 gap into the main save blob.");
             Conv.Write(dst.Text, t, recs, Say);
 
             Say("");
@@ -318,7 +347,7 @@ class MainForm : Form {
             if (t == Plat.PS4) Say("the sce_sys folder (param.sfo, icon0.png) stays in place.");
             else if (t == Plat.PS3) Say("PARAM.SFO and ICON0.PNG stay in place.");
             else if (t == Plat.WiiU) Say("the meta folder (meta.xml, iconTex.tga) stays in place.");
-            else Say("the .header file in the Headers folder stays in place.");
+            else Say("the .header file in Headers\\ stays in place - without it xenia shows a blank slot.");
             Say("Options files and slot metadata are left untouched.");
         } catch (Exception ex) {
             Say("ERROR: " + ex.Message);
