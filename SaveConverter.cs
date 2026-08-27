@@ -1,10 +1,15 @@
-// LEGO Dimensions save converter - Xbox 360 (xenia) <-> PS3 (RPCS3) <-> PS4 (shadPS4)
+// LEGO Dimensions save converter
+// Xbox 360 (xenia) <-> PS3 (RPCS3) <-> PS4 (shadPS4) <-> Wii U (Cemu)
 //
 // Every platform stores the same 24-byte header followed by an opaque payload:
-//   u32 version (13)   u32 sigA   u32 zero   u32 sigB (0x502C3F10)   u32 checksum   u32 length
-// The header dwords use the console's native byte order; the payload itself is
-// byte-identical across all three, which is what makes conversion a header rewrite
-// rather than a data translation.
+//   u32 version   u32 sigA   u32 zero   u32 sigB (0x502C3F10)   u32 checksum   u32 length
+// The header dwords use the console's native byte order. On the PowerPC consoles
+// sigA is simply sigB + version (checked against versions 1, 12 and 13); the PS4
+// uses its own constant instead.
+//
+// The payload is carried across untouched, so the checksum never needs recomputing.
+// The save VERSION is preserved as well - this tool moves a save between platforms,
+// it does not upgrade one save revision to another.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -14,8 +19,7 @@ using System.Windows.Forms;
 
 public static class Fmt {
     public const uint SIG_B = 0x502C3F10;
-    public const uint SIG_A_PPC = 0x502C3F1D;   // PS3 and Xbox 360
-    public const uint SIG_A_PS4 = 0x81E359DF;
+    public const uint SIG_A_PS4_V13 = 0x81E359DF;   // PS4 does not follow the sigB + version rule
     public const int HDR = 24;
 
     public static uint Rd(byte[] b, int o, bool be) {
@@ -28,94 +32,117 @@ public static class Fmt {
     }
 }
 
-public enum Plat { X360, PS3, PS4 }
+public enum Plat { X360, PS3, PS4, WiiU }
 
 public class Rec {
     public string Name;         // original file name
-    public string Logical;      // MAIN / LEGACY / DLCnn / OPT:<name>
+    public string Logical;      // MAIN / LEGACY / DLC:<n> / OPT:<base>
+    public uint Version;
     public uint Checksum;
     public byte[] Payload;
 }
 
 public static class Conv {
     public static bool IsBE(Plat p) { return p != Plat.PS4; }
-    public static uint SigA(Plat p) { return p == Plat.PS4 ? Fmt.SIG_A_PS4 : Fmt.SIG_A_PPC; }
-    public static bool Pads(Plat p) { return p == Plat.PS3; }          // PS3 rounds files up to 1 KiB
-    public static int LegacyLen(Plat p) {                              // GAME01 is a prefix of V2GAME01
-        if (p == Plat.X360) return 100417;
-        if (p == Plat.PS4)  return 100425;
-        return -1;                                                     // PS3 keeps only the full blob
+    public static bool Pads(Plat p) { return p == Plat.PS3; }   // PS3 rounds files up to 1 KiB
+    public static bool ZeroBased(Plat p) { return p == Plat.WiiU; }
+
+    public static uint SigA(Plat p, uint version) {
+        if (p != Plat.PS4) return Fmt.SIG_B + version;
+        return Fmt.SIG_A_PS4_V13;                               // only known for version 13
     }
 
-    static readonly Regex DataName = new Regex(@"^(V2GAME01|GAME01|DLC\d+)$", RegexOptions.IgnoreCase);
-    static readonly Regex OptName  = new Regex(@"^(OPTS01|ZOPTS01|OPTSC01|FEOPTS01)$", RegexOptions.IgnoreCase);
+    // Fallback payload length for GAME0/GAME01 when the source has no such file (PS3).
+    public static int LegacyLen(Plat p) {
+        if (p == Plat.X360) return 100417;
+        if (p == Plat.PS4)  return 100425;
+        if (p == Plat.WiiU) return 100381;
+        return -1;                                              // PS3 keeps only the full blob
+    }
 
-    // A save file is recognised by its signature, read either way round.
-    public static bool Probe(byte[] b, out bool be, out uint len) {
-        be = false; len = 0;
+    static readonly Regex AnyName =
+        new Regex(@"^(V2GAME|GAME|DLC|OPTSC|OPTS|FEOPTS)(\d{1,2})$", RegexOptions.IgnoreCase);
+
+    // A save file is recognised by sigB plus a sane version, read either way round.
+    public static bool Probe(byte[] b, out bool be, out uint ver, out uint len) {
+        be = false; ver = 0; len = 0;
         if (b.Length < Fmt.HDR) return false;
         foreach (bool cand in new[] { true, false }) {
-            if (Fmt.Rd(b, 12, cand) == Fmt.SIG_B && Fmt.Rd(b, 0, cand) == 13) {
-                be = cand; len = Fmt.Rd(b, 20, cand);
-                return len <= b.Length - Fmt.HDR;
-            }
+            if (Fmt.Rd(b, 12, cand) != Fmt.SIG_B) continue;
+            uint v = Fmt.Rd(b, 0, cand);
+            if (v == 0 || v > 255) continue;
+            uint n = Fmt.Rd(b, 20, cand);
+            if (n > b.Length - Fmt.HDR) continue;
+            be = cand; ver = v; len = n;
+            return true;
         }
         return false;
     }
 
     public static Plat Detect(string dir, out List<string> notes) {
         notes = new List<string>();
-        bool sawBE = false, sawLE = false, sawPad = false, sawV2 = false;
+        bool sawBE = false, sawLE = false, sawPad = false, sawSingle = false;
+        uint ver = 0;
         foreach (string f in Directory.GetFiles(dir)) {
             string n = Path.GetFileName(f);
-            if (!DataName.IsMatch(n) && !OptName.IsMatch(n)) continue;
+            Match m = AnyName.Match(n);
+            if (!m.Success) continue;
             byte[] b = File.ReadAllBytes(f);
-            bool be; uint len;
-            if (!Probe(b, out be, out len)) continue;
+            bool be; uint v, len;
+            if (!Probe(b, out be, out v, out len)) continue;
             if (be) sawBE = true; else sawLE = true;
             if (b.Length > Fmt.HDR + len) sawPad = true;
-            if (n.Equals("V2GAME01", StringComparison.OrdinalIgnoreCase)) sawV2 = true;
+            ver = v;
+            // GAME0 / V2GAME0 / OPTS0 are unambiguous: only Wii U numbers from zero.
+            string bas = m.Groups[1].Value.ToUpperInvariant();
+            if (m.Groups[2].Value.Length == 1 && bas != "DLC") sawSingle = true;
         }
         if (!sawBE && !sawLE) throw new Exception("No LEGO Dimensions save files found in this folder.");
-        if (sawLE) { notes.Add("byte order: little-endian"); return Plat.PS4; }
-        notes.Add("byte order: big-endian");
-        if (sawPad) { notes.Add("files padded to a 1 KiB boundary"); return Plat.PS3; }
-        if (sawV2)  notes.Add("V2GAME01 present");
+        notes.Add("save version " + ver);
+        if (sawLE) { notes.Add("little-endian"); return Plat.PS4; }
+        notes.Add("big-endian");
+        if (sawSingle) { notes.Add("zero-based file names"); return Plat.WiiU; }
+        if (sawPad) { notes.Add("padded to a 1 KiB boundary"); return Plat.PS3; }
         return Plat.X360;
     }
 
     public static List<Rec> Read(string dir, Plat src, bool withOptions) {
         var recs = new List<Rec>();
-        bool hasV2 = File.Exists(Path.Combine(dir, "V2GAME01"));
+        bool zero = ZeroBased(src);
+        string v2 = zero ? "V2GAME0" : "V2GAME01";
+        bool hasV2 = File.Exists(Path.Combine(dir, v2));
         foreach (string f in Directory.GetFiles(dir)) {
             string n = Path.GetFileName(f);
-            bool isData = DataName.IsMatch(n), isOpt = OptName.IsMatch(n);
-            if (!isData && !(isOpt && withOptions)) continue;
+            Match m = AnyName.Match(n);
+            if (!m.Success) continue;
+            string bas = m.Groups[1].Value.ToUpperInvariant();
+            bool isOpt = (bas == "OPTS" || bas == "OPTSC" || bas == "FEOPTS");
+            if (isOpt && !withOptions) continue;
             byte[] b = File.ReadAllBytes(f);
-            bool be; uint len;
-            if (!Probe(b, out be, out len)) continue;
+            bool be; uint ver, len;
+            if (!Probe(b, out be, out ver, out len)) continue;
             var r = new Rec();
-            r.Name = n;
-            r.Checksum = Fmt.Rd(b, 16, be);
+            r.Name = n; r.Version = ver; r.Checksum = Fmt.Rd(b, 16, be);
             r.Payload = new byte[len];
             Array.Copy(b, Fmt.HDR, r.Payload, 0, (int)len);
-            string up = n.ToUpperInvariant();
-            if (up == "V2GAME01") r.Logical = "MAIN";
-            else if (up == "GAME01") r.Logical = hasV2 ? "LEGACY" : "MAIN";  // PS3 keeps the full blob under this name
-            else if (up.StartsWith("DLC")) r.Logical = up;
-            else r.Logical = "OPT:" + up;
+            if (bas == "V2GAME") r.Logical = "MAIN";
+            else if (bas == "GAME") r.Logical = hasV2 ? "LEGACY" : "MAIN";   // PS3 stores the full blob here
+            else if (bas == "DLC") {
+                int idx = int.Parse(m.Groups[2].Value);
+                r.Logical = "DLC:" + (zero ? idx + 1 : idx);                 // canonical index is 1-based
+            } else r.Logical = "OPT:" + bas;
             recs.Add(r);
         }
         return recs;
     }
 
-    static byte[] Build(Plat tgt, uint checksum, byte[] payload) {
+    static byte[] Build(Plat tgt, uint version, uint checksum, byte[] payload) {
         int exact = Fmt.HDR + payload.Length;
         int total = Pads(tgt) ? ((exact + 1023) / 1024) * 1024 : exact;
         byte[] o = new byte[total];
         bool be = IsBE(tgt);
-        Fmt.Wr(o, 0, 13, be);
-        Fmt.Wr(o, 4, SigA(tgt), be);
+        Fmt.Wr(o, 0, version, be);
+        Fmt.Wr(o, 4, SigA(tgt, version), be);
         Fmt.Wr(o, 8, 0, be);
         Fmt.Wr(o, 12, Fmt.SIG_B, be);
         Fmt.Wr(o, 16, checksum, be);
@@ -124,38 +151,50 @@ public static class Conv {
         return o;
     }
 
+    static string Suffix(Plat tgt, int canonicalIndex) {
+        if (ZeroBased(tgt)) return (canonicalIndex - 1).ToString();
+        return canonicalIndex.ToString("00");
+    }
+
     static string OutName(Plat tgt, Rec r) {
-        if (r.Logical == "MAIN")   return tgt == Plat.PS3 ? "GAME01" : "V2GAME01";
-        if (r.Logical == "LEGACY") return "GAME01";
-        if (r.Logical.StartsWith("DLC")) return r.Logical;
+        string one = ZeroBased(tgt) ? "0" : "01";
+        if (r.Logical == "MAIN")   return tgt == Plat.PS3 ? "GAME" + one : "V2GAME" + one;
+        if (r.Logical == "LEGACY") return "GAME" + one;
+        if (r.Logical.StartsWith("DLC:")) return "DLC" + Suffix(tgt, int.Parse(r.Logical.Substring(4)));
         string o = r.Logical.Substring(4);
-        if (o == "OPTS01"  && tgt == Plat.PS4) return "ZOPTS01";
-        if (o == "ZOPTS01" && tgt != Plat.PS4) return "OPTS01";
-        if ((o == "OPTSC01" || o == "FEOPTS01") && tgt == Plat.X360) return null;  // not used on Xbox
-        return o;
+        if ((o == "OPTSC" || o == "FEOPTS") && tgt == Plat.X360) return null;   // not used on Xbox
+        return o + one;
     }
 
     public static void Write(string outDir, Plat tgt, List<Rec> recs, Action<string> log) {
         Directory.CreateDirectory(outDir);
         string bak = Path.Combine(outDir, "_backup_");
-        Rec main = null;
-        foreach (Rec r in recs) if (r.Logical == "MAIN") main = r;
-        if (main == null) throw new Exception("The source folder has no main save file (GAME01 / V2GAME01).");
+        Rec main = null, legacy = null;
+        foreach (Rec r in recs) {
+            if (r.Logical == "MAIN") main = r;
+            if (r.Logical == "LEGACY") legacy = r;
+        }
+        if (main == null) throw new Exception("The source folder has no main save file (GAME / V2GAME).");
+
+        if (tgt == Plat.PS4 && main.Version != 13)
+            log("WARNING: the PS4 signature is only known for save version 13; this save is version "
+                + main.Version + ", so the result may be rejected.");
 
         var plan = new List<Rec>();
         foreach (Rec r in recs) if (r.Logical != "LEGACY") plan.Add(r);
 
-        // GAME01 is literally the first N bytes of the main blob sharing its checksum,
-        // so it is rebuilt for the target rather than carried over at the source's length.
-        int lg = LegacyLen(tgt);
-        if (lg > 0) {
-            int n = Math.Min(lg, main.Payload.Length);
+        // GAME is the first N bytes of V2GAME sharing its checksum, so it is rebuilt from
+        // the main blob. Its length follows the source when the source had one, because
+        // that length belongs to the save's own version.
+        if (LegacyLen(tgt) > 0) {
+            int want = legacy != null ? legacy.Payload.Length : LegacyLen(tgt);
+            int n = Math.Min(want, main.Payload.Length);
             var leg = new Rec();
-            leg.Logical = "LEGACY"; leg.Checksum = main.Checksum;
+            leg.Logical = "LEGACY"; leg.Version = main.Version; leg.Checksum = main.Checksum;
             leg.Payload = new byte[n];
             Array.Copy(main.Payload, 0, leg.Payload, 0, n);
             plan.Add(leg);
-            log("GAME01 rebuilt from the main blob: " + n + " bytes of payload");
+            log("GAME rebuilt from the main blob: " + n + " bytes of payload");
         }
 
         int written = 0;
@@ -167,11 +206,10 @@ public static class Conv {
                 Directory.CreateDirectory(bak);
                 File.Copy(dst, Path.Combine(bak, name), true);
             }
-            byte[] data = Build(tgt, r.Checksum, r.Payload);
-            File.WriteAllBytes(dst, data);
+            File.WriteAllBytes(dst, Build(tgt, r.Version, r.Checksum, r.Payload));
             written++;
         }
-        log("files written: " + written);
+        log("files written: " + written + " (save version " + main.Version + " preserved)");
         if (Directory.Exists(bak)) log("existing files were copied to _backup_ first");
     }
 }
@@ -198,7 +236,8 @@ class MainForm : Form {
         Add(new Label { Text = "Target platform:", Left = 12, Top = 88, Width = 130 });
         tgt.SetBounds(148, 85, 240, 23);
         tgt.DropDownStyle = ComboBoxStyle.DropDownList;
-        tgt.Items.AddRange(new object[] { "Xbox 360 (xenia)", "PS3 (RPCS3)", "PS4 (shadPS4)" });
+        tgt.Items.AddRange(new object[] {
+            "Xbox 360 (xenia)", "PS3 (RPCS3)", "PS4 (shadPS4)", "Wii U (Cemu)" });
         tgt.SelectedIndex = 0; Add(tgt);
 
         opts.SetBounds(400, 86, 244, 22);
@@ -250,7 +289,8 @@ class MainForm : Form {
     static string Human(Plat p) {
         if (p == Plat.X360) return "Xbox 360";
         if (p == Plat.PS3) return "PS3";
-        return "PS4";
+        if (p == Plat.PS4) return "PS4";
+        return "Wii U";
     }
 
     void Run() {
@@ -264,7 +304,7 @@ class MainForm : Form {
 
             List<string> notes;
             Plat s = Conv.Detect(src.Text, out notes);
-            Plat t = tgt.SelectedIndex == 0 ? Plat.X360 : (tgt.SelectedIndex == 1 ? Plat.PS3 : Plat.PS4);
+            Plat t = (Plat)tgt.SelectedIndex;
             Say("Source: " + Human(s) + " (" + string.Join(", ", notes.ToArray()) + ")");
             Say("Target: " + Human(t));
             if (s == t) Say("NOTE: source and target are the same platform, so files are just rewritten.");
@@ -277,6 +317,7 @@ class MainForm : Form {
             Say("Done. Copy the result into a save slot the game itself created, so that");
             if (t == Plat.PS4) Say("the sce_sys folder (param.sfo, icon0.png) stays in place.");
             else if (t == Plat.PS3) Say("PARAM.SFO and ICON0.PNG stay in place.");
+            else if (t == Plat.WiiU) Say("the meta folder (meta.xml, iconTex.tga) stays in place.");
             else Say("the .header file in the Headers folder stays in place.");
             Say("Options files and slot metadata are left untouched.");
         } catch (Exception ex) {
