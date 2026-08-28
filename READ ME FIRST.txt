@@ -1,0 +1,118 @@
+================================================================================
+  LEGO Dimensions Save Converter  --  READ ME FIRST
+  https://github.com/NeverCookFirst/DimensionsSaveConverter
+================================================================================
+
+
+  !!  NO GUARANTEE  --  BACK UP FIRST  !!
+
+  This tool comes with NO GUARANTEE that the saves it produces are stable or
+  free of corruption. USE IT AT YOUR OWN RISK, and ALWAYS keep a backup of any
+  save you care about before touching it.
+
+  The save format was reverse-engineered, not documented. It is verified as far
+  as it can be -- a real Xbox 360 save survives a full round trip bit-identical
+  -- but the game's field types are only known for the parts that real saves
+  happened to exercise. A field shape nobody has seen yet may still convert
+  wrongly, and a bad conversion can look perfectly fine for hours of play before
+  something turns out to be missing or nonsensical.
+
+  Convert into a SPARE SLOT. Never over your only copy.
+
+
+--------------------------------------------------------------------------------
+  WHAT IT DOES
+--------------------------------------------------------------------------------
+
+  Moves a LEGO Dimensions save between Xbox 360 (xenia), PS3 (RPCS3),
+  PS4 (shadPS4) and Wii U (Cemu). Any direction, all files at once.
+
+  Windows only. Single .exe, nothing to install.
+
+
+--------------------------------------------------------------------------------
+  HOW TO USE IT
+--------------------------------------------------------------------------------
+
+  1. Back up the save you are converting FROM, and the slot you are converting
+     INTO. Copy both folders somewhere safe. Do this first, not later.
+
+  2. Run DimensionsSaveConverter.exe.
+
+  3. Source save folder  -> the folder holding the save you want to convert.
+     The platform and save version are detected and shown underneath.
+
+  4. Target platform     -> the emulator you want to play it on.
+
+  5. Output folder       -> an empty folder. Must not be the source folder.
+
+  6. Press Convert.
+
+
+--------------------------------------------------------------------------------
+  TWO THINGS THAT WILL BITE YOU IF YOU SKIP THEM
+--------------------------------------------------------------------------------
+
+  1) CONVERT THE WHOLE SAVE, WITH EVERY DLC FILE
+
+     Point the tool at the COMPLETE save folder -- all thirty DLC files along
+     with GAME and V2GAME -- and copy ALL of the results into the target slot.
+
+     Progress is spread across those files. Each DLC file is one world; the main
+     blob only holds what is common to all of them. Convert a partial folder, or
+     copy only some of the output across, and you get a save that loads but is
+     missing worlds. There is nothing to gain by leaving files out.
+
+
+  2) THE TARGET SLOT MUST ALREADY CONTAIN A SAVE THE GAME ITSELF MADE
+
+     DO NOT just drop the converted folder in as a new save slot. It will not
+     work.
+
+     Instead:
+        - start the game on the target emulator
+        - create a new save in a spare slot
+        - quit the game
+        - REPLACE THE FILES INSIDE THAT SLOT with the converted ones
+
+     Every platform stores per-slot metadata that this tool never writes. Without
+     it the slot shows up empty or not at all, no matter how correct the save
+     files themselves are:
+
+        Xbox 360 (xenia)  the .header file in  Headers\<profile>\
+        PS3 (RPCS3)       PARAM.SFO  and  ICON0.PNG
+        PS4 (shadPS4)     the  sce_sys\  folder  (param.sfo, icon0.png)
+        Wii U (Cemu)      the  meta\  folder  (meta.xml, iconTex.tga)
+
+     So: let the game create the slot, then swap the files inside it.
+
+
+--------------------------------------------------------------------------------
+  WHERE SAVES USUALLY LIVE
+--------------------------------------------------------------------------------
+
+  xenia     content\<profile>\5752084B\00000001\savegame_1\
+  RPCS3     dev_hdd0\home\00000001\savedata\BLES02105000\   (EU)
+            dev_hdd0\home\00000001\savedata\BLUS31488\      (US)
+  shadPS4   savedata\CUSA01176\Slot00\
+  Cemu      <title id>\user\<account>\Slot1\
+
+
+--------------------------------------------------------------------------------
+  NOTES
+--------------------------------------------------------------------------------
+
+  - Region does not matter. It only changes the folder name (the title ID),
+    never the file format. Drop the output into whichever regional folder your
+    own copy uses.
+
+  - Options files (settings, not progress) are not carried between platforms of
+    different byte order. Volume, subtitles and so on will need setting again.
+
+  - The save revision is preserved, not upgraded. Wii U saves are revision 12
+    while the others are revision 13; whether the game accepts a revision 12
+    save on another platform is untested. Try it on a spare slot.
+
+  - If files already exist in the output folder they are copied into a _backup_
+    subfolder first. That is a convenience, not a backup strategy. Keep your own
+    copy too.
