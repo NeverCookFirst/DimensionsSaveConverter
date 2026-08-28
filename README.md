@@ -1,4 +1,6 @@
-# LEGO Dimensions Save Converter
+<h1 align="center">LEGO Dimensions Save Converter</h1>
+
+Thanks [LEGO Dimensions Discord](https://discord.gg/PuXpBMFE4P) for support!
 
 Converts LEGO Dimensions save files between **Xbox 360 (xenia)**, **PS3 (RPCS3)**,
 **PS4 (shadPS4)** and **Wii U (Cemu)** — any direction, all files at once.
