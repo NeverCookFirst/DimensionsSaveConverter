@@ -42,7 +42,7 @@ public static class Fmt {
     }
 }
 
-public enum Plat { X360, PS3, PS4, WiiU }
+public enum Plat { X360, PS3, PS4, WiiU, Recomp }
 
 // Finds the 64-bit fields inside a save payload so their two halves can be swapped when
 // moving between the PS4 and the PowerPC consoles.
@@ -307,6 +307,95 @@ public static class Revision {
     }
 }
 
+// ReXGlue, the static recompilation, reads the very same save files the Xbox 360 does -
+// same byte order, same revision, same names. What it does not read is xenia's slot
+// metadata: xenia keeps the whole 40 KiB STFS container header (a "CON " blob) in
+// Headers\<type>\<slot>.header, while ReXGlue keeps the 328-byte XCONTENT_AGGREGATE_DATA the
+// kernel hands back to the game, laid out as
+//
+//     0x000 be u32 device_id            1
+//     0x004 be u32 content_type         1, a saved game
+//     0x008 128 UTF-16BE chars          display name, "Game: 3"
+//     0x108 42 bytes                    file name, "savegame_3"
+//     0x138 be u64 xuid                 0
+//     0x140 be u32 title_id             5752084B
+//
+// so a save copied across without one is a folder the game never lists.
+public static class Recomp {
+    public const uint TITLE_ID = 0x5752084B;
+    public const int HEADER_SIZE = 0x148;
+
+    // Where xenia keeps the STFS header of a slot: ...\<title>\Headers\<type>\<slot>.header,
+    // two levels up from the slot folder itself.
+    public static string XeniaHeader(string slotDir) {
+        try {
+            string trimmed = slotDir.TrimEnd('\\', '/');
+            string slot = Path.GetFileName(trimmed);
+            string type = Path.GetDirectoryName(trimmed);
+            if (type == null) return null;
+            string title = Path.GetDirectoryName(type);
+            if (title == null) return null;
+            string dir = Path.Combine(Path.Combine(title, "Headers"), Path.GetFileName(type));
+            string path = Path.Combine(dir, slot + ".header");
+            return File.Exists(path) ? path : null;
+        } catch (ArgumentException) { return null; }
+    }
+
+    // The display name the slot already had, read out of xenia's STFS header where it sits at
+    // 0x411 as UTF-16BE. Anything else falls back to what the game itself would have written.
+    public static string DisplayName(string slotDir, string slot) {
+        string path = XeniaHeader(slotDir);
+        if (path != null) {
+            try {
+                byte[] b = File.ReadAllBytes(path);
+                if (b.Length > 0x413 && b[0] == 0x43 && b[1] == 0x4F && b[2] == 0x4E) {
+                    var sb = new System.Text.StringBuilder();
+                    for (int o = 0x411; o + 1 < b.Length && sb.Length < 127; o += 2) {
+                        int ch = (b[o] << 8) | b[o + 1];
+                        if (ch == 0) break;
+                        sb.Append((char)ch);
+                    }
+                    if (sb.Length > 0) return sb.ToString();
+                }
+            } catch (IOException) { }
+        }
+        return FromSlot(slot);
+    }
+
+    // "savegame_3" is the game's third slot, which it names "Game: 3".
+    public static string FromSlot(string slot) {
+        int n = 0, place = 1;
+        for (int i = slot.Length - 1; i >= 0 && char.IsDigit(slot[i]); i--) {
+            n += (slot[i] - '0') * place;
+            place *= 10;
+        }
+        return "Game: " + (n > 0 ? n : 1);
+    }
+
+    // The slot folder name to write, taken from the source slot when it has one.
+    public static string SlotName(string slotDir) {
+        string name = Path.GetFileName(slotDir.TrimEnd('\\', '/'));
+        return name.StartsWith("savegame_", StringComparison.OrdinalIgnoreCase) ? name : "savegame_1";
+    }
+
+    static void Be32(byte[] b, int o, uint v) {
+        b[o] = (byte)(v >> 24); b[o+1] = (byte)(v >> 16); b[o+2] = (byte)(v >> 8); b[o+3] = (byte)v;
+    }
+
+    public static byte[] Header(string slot, string displayName) {
+        byte[] h = new byte[HEADER_SIZE];
+        Be32(h, 0x000, 1);                          // device_id
+        Be32(h, 0x004, 1);                          // content_type: saved game
+        for (int i = 0; i < displayName.Length && i < 127; i++) {
+            h[0x008 + i * 2] = (byte)(displayName[i] >> 8);
+            h[0x009 + i * 2] = (byte)displayName[i];
+        }
+        for (int i = 0; i < slot.Length && i < 41; i++) h[0x108 + i] = (byte)slot[i];
+        Be32(h, 0x140, TITLE_ID);                   // the xuid at 0x138 stays zero
+        return h;
+    }
+}
+
 public class Rec {
     public string Name;         // original file name
     public string Logical;      // MAIN / LEGACY / DLC:<n> / OPT:<base>
@@ -436,6 +525,7 @@ public static class Conv {
         if (p == Plat.X360) return "Xbox 360";
         if (p == Plat.PS3) return "PS3";
         if (p == Plat.PS4) return "PS4";
+        if (p == Plat.Recomp) return "Recomp (ReXGlue)";
         return "Wii U";
     }
 
@@ -569,9 +659,11 @@ public static class Conv {
         return o + one;
     }
 
-    // Wii U splits a save in two: the slot files live in Slot<n> and the shared options
-    // file in an OPTIONS folder beside it. The other three platforms keep one flat folder.
-    static string SubDir(Plat tgt, string logical) {
+    // Wii U splits a save in two: the slot files live in Slot<n> and the shared options file
+    // in an OPTIONS folder beside it. ReXGlue mounts a package as a folder, so its files go
+    // under <content type>\<slot>. The other three keep one flat folder.
+    static string SubDir(Plat tgt, string logical, string slot) {
+        if (tgt == Plat.Recomp) return Path.Combine("00000001", slot);
         if (tgt != Plat.WiiU) return "";
         return logical == "OPT:GLOBAL" ? "OPTIONS" : "Slot1";
     }
@@ -590,6 +682,26 @@ public static class Conv {
     }
 
     public static void Write(string outDir, Plat tgt, List<Rec> recs, Action<string> log) {
+        Write(outDir, tgt, recs, null, log);
+    }
+
+    public static void Write(string outDir, Plat tgt, List<Rec> recs, string srcDir, Action<string> log) {
+        Write(outDir, tgt, recs, srcDir, null, log);
+    }
+
+    public static void Write(string outDir, Plat tgt, List<Rec> recs, string srcDir,
+                             string slotName, Action<string> log) {
+        // ReXGlue keeps a save under <profile>\<title id>\00000001\<slot>, with its header in
+        // <title id>\Headers\00000001. The output folder is the profile folder, so the title id
+        // is added unless the folder chosen already is one.
+        string slot = "savegame_1";
+        if (tgt == Plat.Recomp) {
+            if (srcDir != null) slot = Recomp.SlotName(srcDir);
+            if (!string.IsNullOrEmpty(slotName)) slot = slotName;
+            string tail = Path.GetFileName(outDir.TrimEnd('\\', '/'));
+            if (!tail.Equals(Recomp.TITLE_ID.ToString("X8"), StringComparison.OrdinalIgnoreCase))
+                outDir = Path.Combine(outDir, Recomp.TITLE_ID.ToString("X8"));
+        }
         Directory.CreateDirectory(outDir);
         string bak = Path.Combine(outDir, "_backup_");
         Rec main = null;
@@ -623,7 +735,20 @@ public static class Conv {
             string name = OutName(tgt, r);
             if (name == null) { log("skipped " + r.Name + " (not used on this platform)"); continue; }
             byte[] pay = r.Payload;
-            if (outVer != r.Version) {
+            // The options files ReXGlue's own build wrote have to stay. Dropping another
+            // machine's copies over them is what leaves Load Game showing an empty slot -
+            // learned the hard way on 2026-09-03. Progress is GAME / V2GAME / DLC, and that
+            // is all that crosses, whatever the options checkbox says.
+            if (tgt == Plat.Recomp && r.Logical.StartsWith("OPT:")) {
+                log("kept ReXGlue's own " + r.Name + " (options never cross into a recomp save)");
+                continue;
+            }
+            // An options file carries its own version, unrelated to the save revision: a real
+            // revision 13 Xbox 360 save stamps OPTSC01, FEOPTS01 and GLOBAL01 with 12 while
+            // GAME01 says 13. They keep what they came with and skip the revision converter.
+            bool isOpt = r.Logical.StartsWith("OPT:");
+            uint ver = isOpt ? r.Version : outVer;
+            if (!isOpt && outVer != r.Version) {
                 string why;
                 byte[] shifted = Revision.Retarget(pay, r.Version, outVer, r.Logical, out why);
                 if (shifted == null) {
@@ -634,9 +759,9 @@ public static class Conv {
                 pay = shifted;
                 moved++;
             }
-            byte[] bytes = Build(tgt, r.Logical, outVer, r.Checksum, pay);
+            byte[] bytes = Build(tgt, r.Logical, ver, r.Checksum, pay);
             if (r.Logical == "MAIN") mainBytes = bytes;
-            Emit(outDir, bak, SubDir(tgt, r.Logical), name, bytes);
+            Emit(outDir, bak, SubDir(tgt, r.Logical, slot), name, bytes);
             written++;
         }
         if (moved > 0) log("files rewritten at revision " + outVer + ": " + moved);
@@ -654,10 +779,22 @@ public static class Conv {
                 byte[] leg = new byte[total];
                 Array.Copy(mainBytes, 0, leg, 0, total);
                 Fmt.Wr(leg, 20, (uint)payLen, IsBE(tgt));
-                Emit(outDir, bak, SubDir(tgt, "MAIN"), ZeroBased(tgt) ? "GAME0" : "GAME01", leg);
+                Emit(outDir, bak, SubDir(tgt, "MAIN", slot), ZeroBased(tgt) ? "GAME0" : "GAME01", leg);
                 written++;
                 log("GAME written as the first " + payLen + " payload bytes of the main file");
             } else log("WARNING: the main blob is shorter than a GAME file; GAME not written.");
+        }
+        // Without this header ReXGlue does not list the folder at all, however complete it is.
+        if (tgt == Plat.Recomp) {
+            string shown = (srcDir != null && slot == Recomp.SlotName(srcDir))
+                         ? Recomp.DisplayName(srcDir, slot)     // the name it had on xenia
+                         : Recomp.FromSlot(slot);
+            Emit(outDir, bak, Path.Combine("Headers", "00000001"), slot + ".header",
+                 Recomp.Header(slot, shown));
+            written++;
+            log("wrote the ReXGlue slot header for " + slot + ", named " + shown);
+            log("laid out the ReXGlue way: 00000001\\" + slot + " with Headers\\00000001\\"
+                + slot + ".header");
         }
         log("files written: " + written + " (save revision " + outVer + ")");
         if (tgt == Plat.WiiU) log("laid out the Wii U way: slot files in Slot1, GLOBAL in OPTIONS");
@@ -667,8 +804,8 @@ public static class Conv {
 
 class MainForm : Form {
     TextBox src = new TextBox(), dst = new TextBox(), log = new TextBox();
-    ComboBox tgt = new ComboBox();
-    Label det = new Label();
+    ComboBox tgt = new ComboBox(), rslot = new ComboBox();
+    Label det = new Label(), rslotLabel = new Label();
     CheckBox opts = new CheckBox();
     List<string> slots = new List<string>();
 
@@ -694,7 +831,8 @@ class MainForm : Form {
         tgt.SetBounds(148, 97, 240, 23);
         tgt.DropDownStyle = ComboBoxStyle.DropDownList;
         tgt.Items.AddRange(new object[] {
-            "Xbox 360 (xenia)", "PS3 (RPCS3)", "PS4 (shadPS4)", "Wii U (Cemu)" });
+            "Xbox 360 (xenia)", "PS3 (RPCS3)", "PS4 (shadPS4)", "Wii U (Cemu)",
+            "Recomp (ReXGlue)" });
         tgt.SelectedIndex = 0; Add(tgt);
 
         opts.SetBounds(400, 98, 244, 22);
@@ -709,6 +847,20 @@ class MainForm : Form {
         var go = new Button { Text = "Convert", Left = 12, Top = 184, Width = 160, Height = 30 };
         go.Click += (s, e) => Run(); Add(go);
 
+        // Which slot the recomp save lands in. A slot ReXGlue has already loaded once is the
+        // safe choice: one it created but never committed to cannot be loaded at all.
+        rslotLabel.Text = "ReXGlue slot:";
+        rslotLabel.SetBounds(190, 190, 84, 20);
+        Add(rslotLabel);
+        rslot.SetBounds(280, 187, 170, 23);
+        rslot.DropDownStyle = ComboBoxStyle.DropDown;
+        rslot.Items.Add("(same as the source)");
+        for (int i = 1; i <= 8; i++) rslot.Items.Add("savegame_" + i);
+        rslot.SelectedIndex = 0;
+        Add(rslot);
+        tgt.SelectedIndexChanged += (s, e) => ShowSlotPicker();
+        ShowSlotPicker();
+
         log.SetBounds(12, 224, 632, 204);
         log.Multiline = true; log.ReadOnly = true; log.ScrollBars = ScrollBars.Vertical;
         log.BackColor = Color.White;
@@ -716,6 +868,18 @@ class MainForm : Form {
         Add(log);
 
         src.TextChanged += (s, e) => Sniff();
+    }
+
+    void ShowSlotPicker() {
+        bool on = (Plat)tgt.SelectedIndex == Plat.Recomp;
+        rslot.Visible = on;
+        rslotLabel.Visible = on;
+    }
+
+    string SlotChoice() {
+        string v = rslot.Text.Trim();
+        if (v.Length == 0 || v.StartsWith("(")) return null;
+        return v;
     }
 
     AnchorStyles AnchorLeft()  { return AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right; }
@@ -818,19 +982,21 @@ class MainForm : Form {
                     "-endian structs and cannot be converted; skipping them.");
                 wantOptions = false;
             }
-            if (wantOptions && Revision.Native(s) != Revision.Native(t)) {
-                Say("NOTE: options files are raw structs with no record stream, so they cannot"
-                    + " be moved between save revisions; skipping them.");
-                wantOptions = false;
-            }
 
             List<Rec> recs = Conv.Read(sdir, s, wantOptions, Say);
             Say("Files read: " + recs.Count);
             if (s == Plat.PS4 && t != Plat.PS4) Say("Removed the 8-byte PS4 gap from the main save blob.");
             if (t == Plat.PS4 && s != Plat.PS4) Say("Inserted the 8-byte PS4 gap into the main save blob.");
-            Conv.Write(dst.Text, t, recs, Say);
+            Conv.Write(dst.Text, t, recs, sdir, t == Plat.Recomp ? SlotChoice() : null, Say);
 
             Say("");
+            if (t == Plat.Recomp) {
+                Say("Done. Point the output folder at the profile folder inside ReXGlue's content\\ -");
+                Say("the one named after the XUID. The title id folder, the slot and its header are");
+                Say("all written for you, so nothing has to exist there first.");
+                Say("Options files and slot metadata are left untouched.");
+                return;
+            }
             Say("Done. Copy the result into a save slot the game itself created, so that");
             if (t == Plat.PS4) Say("the sce_sys folder (param.sfo, icon0.png) stays in place.");
             else if (t == Plat.PS3) Say("PARAM.SFO and ICON0.PNG stay in place.");

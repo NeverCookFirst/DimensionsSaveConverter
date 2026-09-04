@@ -3,7 +3,8 @@
 Thanks [LEGO Dimensions Discord](https://discord.gg/PuXpBMFE4P) for support!
 
 Converts LEGO Dimensions save files between **Xbox 360 (xenia)**, **PS3 (RPCS3)**,
-**PS4 (shadPS4)** and **Wii U (Cemu)** — any direction, all files at once.
+**PS4 (shadPS4)** and **Wii U (Cemu)** — any direction, all files at once — and out to
+**Recomp (ReXGlue)**, the static recompilation.
 
 Small Windows GUI, single executable, no dependencies and nothing to install.
 
@@ -84,6 +85,7 @@ Where saves usually live:
 | xenia | `content\<profile>\5752084B\00000001\savegame_1\` |
 | RPCS3 | `dev_hdd0\home\00000001\savedata\BLES02105000\` (EU) or `BLUS31488\` (US) |
 | shadPS4 | `savedata\CUSA01176\Slot00\` |
+| ReXGlue | `content\<XUID>\5752084B\00000001\savegame_1\` |
 | Cemu | `save\00050000\<title id>\user\<account>\Slot1\`, with `OPTIONS\` beside it |
 
 On Cemu the account is the Wii U `persistentId` — `80000001` for the first account Cemu
@@ -92,6 +94,40 @@ is `0005000010195D00`, so its saves sit under `save\00050000\10195d00\` (product
 `WUP-U-APZP`, region `00000004`). A US or JP copy uses a different title id, which you can
 read out of `meta\meta.xml` in your own dump. None of this affects conversion — point the
 tool at the dump and it finds the slot itself.
+
+### Recomp (ReXGlue)
+
+ReXGlue reads the very same files the Xbox 360 does — same byte order, same revision, same
+names — so nothing inside them changes. What differs is the shape around them. xenia keeps
+the whole 40 KiB STFS container header (a `CON ` blob) per slot; ReXGlue keeps the 328-byte
+`XCONTENT_AGGREGATE_DATA` the kernel hands the game:
+
+| offset | field | value |
+|---|---|---|
+| 0x000 | `device_id` (BE u32) | 1 |
+| 0x004 | `content_type` (BE u32) | 1, a saved game |
+| 0x008 | display name | 128 UTF-16BE chars, e.g. `Game: 3` |
+| 0x108 | file name | 42 bytes, e.g. `savegame_3` |
+| 0x138 | `xuid` (BE u64) | 0 |
+| 0x140 | `title_id` (BE u32) | `5752084B` |
+
+Point **Output folder** at the profile folder inside ReXGlue's `content\` — the one named
+after the XUID. The title id folder, `00000001\<slot>` and `Headers\00000001\<slot>.header`
+are all written for you, so nothing has to exist there first.
+
+**ReXGlue slot** picks which slot to land in. Left at *(same as the source)* the save keeps
+the slot name and display name it had under xenia, the latter read out of xenia's own STFS
+header; choose `savegame_2` and it is written there instead, named `Game: 2`.
+
+**Aim at a slot ReXGlue has loaded before, and merge into it rather than replacing the
+folder.** A slot ReXGlue created but never committed a save to — made, then quit before the
+intro cutscenes finish — cannot be loaded at all. Merging also leaves that slot's own
+`OPTS01`, `FEOPTS01` and `OPTSC01` in place, which is what the converter expects: it never
+writes options into a recomp save, because another machine's copies of those are what make
+Load Game come up empty.
+
+Without the header ReXGlue still lists the folder, but names the slot after the folder
+rather than `Game: 3`.
 
 ### Does the region matter?
 
@@ -237,9 +273,11 @@ a version 12 save on another platform is untested** — try it on a spare slot f
   not attempted: it is written unchanged, with a warning.
 - Converting a non-revision-13 save **to PS4** emits a warning: the PS4 signature constant
   is only known for revision 13.
-- Options files cannot cross a revision boundary. They are raw structs with no record
-  stream, so they are skipped with a note, exactly as they are across a byte-order
-  boundary.
+- Options files cannot cross a byte-order boundary: they are raw structs with no record
+  stream, so they are skipped with a note. They **can** cross a revision boundary, since
+  each carries its own version rather than the save's — a real revision 13 Xbox 360 save
+  stamps `OPTSC01`, `FEOPTS01` and `GLOBAL01` with 12 while `GAME01` says 13.
+- Options are never written into a **Recomp** save at all, whatever the checkbox says.
 - The PS4 main blob is 8 bytes longer than the Xbox 360 one (308,053 vs 308,045). Lengths
   are preserved rather than trimmed.
 - The record grammar and the 64-bit field types were reverse-engineered from a handful of
