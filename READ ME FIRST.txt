@@ -39,14 +39,38 @@
 
   2. Run DimensionsSaveConverter.exe.
 
-  3. Source save folder  -> the folder holding the save you want to convert.
-     The platform and save version are detected and shown underneath.
+  3. Source save folder  -> the folder holding the save you want to convert,
+     or any folder above it. The tool searches downwards for saves, on
+     every platform, and shows what it found underneath.
+
+     If it finds MORE THAN ONE save it stops and lists the full path of
+     each. Nothing is converted until you point it at exactly one of them.
+     It will not guess which save you meant.
 
   4. Target platform     -> the emulator you want to play it on.
 
   5. Output folder       -> an empty folder. Must not be the source folder.
 
   6. Press Convert.
+
+
+--------------------------------------------------------------------------------
+  WII U / CEMU SAVES ARE BURIED, AND SPLIT IN TWO
+--------------------------------------------------------------------------------
+
+  Cemu does not keep a Wii U save in one flat folder. It looks like this:
+
+     save\00050000\<title id>\user\<account>\Slot1\
+        GAME0, V2GAME0, DLC0 ... DLC30, OPTS0, OPTSC0, FEOPTS0
+     save\00050000\<title id>\user\<account>\OPTIONS\
+        GLOBAL0
+
+  Just point the tool at any of those folders -- the dump root, the title
+  folder, or Slot1 itself. It finds the slot on its own and picks up GLOBAL0
+  from the OPTIONS folder next to it.
+
+  Converting TO Wii U writes the same shape back: a Slot1\ folder next to an
+  OPTIONS\ folder, ready to copy into user\<account>\.
 
 
 --------------------------------------------------------------------------------
@@ -109,9 +133,15 @@
   - Options files (settings, not progress) are not carried between platforms of
     different byte order. Volume, subtitles and so on will need setting again.
 
-  - The save revision is preserved, not upgraded. Wii U saves are revision 12
-    while the others are revision 13; whether the game accepts a revision 12
-    save on another platform is untested. Try it on a spare slot.
+  - The save revision is converted for you. Wii U saves are revision 12 while
+    Xbox 360, PS3 and PS4 use revision 13, and the game does NOT accept the
+    wrong revision -- it shows the slot as a brand new game, however correct
+    the data inside it is. The tool rewrites the save to whichever revision
+    the target platform uses, so this is handled; there is nothing to set.
+
+  - Options files cannot cross a revision boundary (or a byte-order one). They
+    are raw structs, not record streams, so they are skipped with a note in
+    the log. Settings will need setting again; progress is unaffected.
 
   - If files already exist in the output folder they are copied into a _backup_
     subfolder first. That is a convenience, not a backup strategy. Keep your own
