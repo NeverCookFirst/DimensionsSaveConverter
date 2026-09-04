@@ -23,11 +23,31 @@ Small Windows GUI, single executable, no dependencies and nothing to install.
 
 ## Usage
 
-1. Point **Source save folder** at a save directory. The platform and save version are
-   detected automatically and shown right below the field.
+1. Point **Source save folder** at a save directory, **or at any folder above one**. On all
+   four platforms the tool searches downwards for folders holding a main save file, and
+   reports the platform and save version of the one it found right below the field.
+
+   If it finds **more than one** save it converts nothing and refuses, listing the full path
+   of each one it found together with what that one is. Point the tool at exactly one of
+   those paths and convert again - it never guesses which save you meant.
 2. Pick the **Target platform**.
 3. Pick an **Output folder** (must be different from the source).
 4. Press **Convert**.
+
+### Wii U saves are not a flat folder
+
+Cemu keeps a Wii U save several folders deep and split in two:
+
+```
+save\00050000\<title id>\user\<account>\Slot1\     GAME0, V2GAME0, DLC0 ... DLC30, OPTS0, ...
+save\00050000\<title id>\user\<account>\OPTIONS\   GLOBAL0
+```
+
+Point the tool at any of those folders — the dump root, the title folder, or the slot
+itself. It finds `Slot1` on its own and picks up `GLOBAL0` from the neighbouring `OPTIONS`
+folder. A dump carrying several slots is refused with all of their paths listed, so aim at
+the one slot you want. Converting **to** Wii U writes the same shape back: `Slot1\` beside
+`OPTIONS\`, ready to be copied into `user\<account>\`.
 
 ### Convert the whole save, with every DLC file
 
@@ -64,12 +84,22 @@ Where saves usually live:
 | xenia | `content\<profile>\5752084B\00000001\savegame_1\` |
 | RPCS3 | `dev_hdd0\home\00000001\savedata\BLES02105000\` (EU) or `BLUS31488\` (US) |
 | shadPS4 | `savedata\CUSA01176\Slot00\` |
-| Cemu | `<title id>\user\<account>\Slot1\` |
+| Cemu | `save\00050000\<title id>\user\<account>\Slot1\`, with `OPTIONS\` beside it |
+
+On Cemu the account is the Wii U `persistentId` — `80000001` for the first account Cemu
+makes. The title id folder is the low half of the game's 16-hex title id: the **EU** release
+is `0005000010195D00`, so its saves sit under `save\00050000\10195d00\` (product code
+`WUP-U-APZP`, region `00000004`). A US or JP copy uses a different title id, which you can
+read out of `meta\meta.xml` in your own dump. None of this affects conversion — point the
+tool at the dump and it finds the slot itself.
 
 ### Does the region matter?
 
 **No.** Region only changes the *folder name* (the title ID), never the file format —
-and the converter works on file contents, not on folder names. A save taken from an EU
+and the converter works on file contents, not on folder names. Everything in this README was
+verified against an **EU** save: a Cemu dump of the PAL Wii U release (`WUP-U-APZP`,
+`0005000010195D00`), converted to Xbox 360 and loaded by the game under xenia with its
+progress intact. A save taken from an EU
 PS3 copy (`BLES02105000`) was loaded successfully by an NTSC-U Xbox 360 copy. Just drop
 the converted files into whichever regional folder your own copy uses.
 
@@ -182,6 +212,16 @@ a version 12 save on another platform is untested** — try it on a spare slot f
   reproduces exactly what the game itself wrote.
 - Round trip PS4 → Xbox 360 → PS4: all 32 files bit-identical.
 - Round trip Wii U → Xbox 360 → Wii U: all 32 files bit-identical.
+- **A real Cemu save dump (`save\00050000\10195d00\user\80000001`, 36 files including
+  `GLOBAL0`), found by pointing the tool at the dump root, comes back bit-identical through
+  Wii U → Wii U and through Wii U → PS4 → Wii U** — the second path swapping 16,338 64-bit
+  fields out of PS4 word order and back, and both crossing the revision boundary twice.
+- Round trip Xbox 360 → Wii U → Xbox 360 on a real xenia save: all 32 files bit-identical,
+  the revision 13 counters surviving the trip down to revision 12 and back.
+- That same Cemu save converted to Xbox 360 matches a real xenia save file for file in
+  **length** — `V2GAME01` 308,069, `GAME01` 100,441, thirty `DLC` files of 234,841 — and in
+  **structure**: same record ids in the same order, same chunk `count`, same stream
+  terminator, with `GAME01` an exact prefix of `V2GAME01`.
 - A PS4 save converted to Xbox 360 was compared against a real xenia save of the same game:
   nine `DLC` files match byte for byte, and the rest differ only by the two players' actual
   progress. Before the 64-bit fix, the same files differed by 240–2600 bytes each.
@@ -193,9 +233,13 @@ a version 12 save on another platform is untested** — try it on a spare slot f
 
 ## Known limits
 
-- Cross-version conversion is not attempted (see above); Wii U saves stay at version 12.
-- Converting a non-version-13 save **to PS4** emits a warning: the PS4 signature constant
-  is only known for version 13.
+- Converting a save whose revision is neither 12 nor 13 (a pre-update revision 1 save) is
+  not attempted: it is written unchanged, with a warning.
+- Converting a non-revision-13 save **to PS4** emits a warning: the PS4 signature constant
+  is only known for revision 13.
+- Options files cannot cross a revision boundary. They are raw structs with no record
+  stream, so they are skipped with a note, exactly as they are across a byte-order
+  boundary.
 - The PS4 main blob is 8 bytes longer than the Xbox 360 one (308,053 vs 308,045). Lengths
   are preserved rather than trimmed.
 - The record grammar and the 64-bit field types were reverse-engineered from a handful of
@@ -218,7 +262,7 @@ Needs nothing beyond what ships with Windows:
 ```
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe ^
   /target:winexe /codepage:65001 /optimize+ ^
-  /out:DimensionsSaveConverter.exe ^
+  /out:DimensionsSaveConverter.exe /win32icon:icon.ico ^
   /reference:System.Windows.Forms.dll /reference:System.Drawing.dll ^
   SaveConverter.cs
 ```
