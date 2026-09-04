@@ -27,6 +27,8 @@
   Moves a LEGO Dimensions save between Xbox 360 (xenia), PS3 (RPCS3),
   PS4 (shadPS4) and Wii U (Cemu). Any direction, all files at once.
 
+  It also converts out to Recomp (ReXGlue), the static recompilation.
+
   Windows only. Single .exe, nothing to install.
 
 
@@ -116,6 +118,7 @@
 --------------------------------------------------------------------------------
 
   xenia     content\<profile>\5752084B\00000001\savegame_1\
+  ReXGlue   content\<XUID>\5752084B\00000001\savegame_1\
   RPCS3     dev_hdd0\home\00000001\savedata\BLES02105000\   (EU)
             dev_hdd0\home\00000001\savedata\BLUS31488\      (US)
   shadPS4   savedata\CUSA01176\Slot00\
@@ -125,6 +128,22 @@
 --------------------------------------------------------------------------------
   NOTES
 --------------------------------------------------------------------------------
+
+  - Converting TO Recomp (ReXGlue): point the output folder at the profile
+    folder inside ReXGlue's content\ -- the one named after the XUID -- and the
+    title id folder, the slot and its header are all written for you. Use the
+    ReXGlue slot box to choose which slot to land in; left alone, the save
+    keeps the slot and name it had under xenia.
+
+    AIM AT A SLOT REXGLUE HAS LOADED BEFORE, and copy the result in by
+    MERGING, not by deleting the slot folder first. A slot ReXGlue made but
+    never committed a save to -- created, then quit before the intro cutscenes
+    finished -- cannot be loaded at all. Merging also leaves that slot's own
+    OPTS01 / FEOPTS01 / OPTSC01 alone, which is what you want: another
+    machine's options files are what make Load Game come up empty. The
+    converter never writes options into a recomp save for that reason.
+
+    Close the game before swapping files. It rewrites the save on exit.
 
   - Region does not matter. It only changes the folder name (the title ID),
     never the file format. Drop the output into whichever regional folder your
