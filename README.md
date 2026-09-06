@@ -307,6 +307,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe ^
 
 ## Related
 
+- [Dimensions Recompiled](https://github.com/NeverCookFirst/DimensionsRecomp) - native PC build of the game, made by static recompilation
 - [Xenia-Seamless-Toypad-Build](https://github.com/NeverCookFirst/Xenia-Seamless-Toypad-Build)
 - [RPCS3-Seamless-Toypad-Build](https://github.com/NeverCookFirst/RPCS3-Seamless-Toypad-Build)
 - [shadPS4-Seamless-Toypad-Bridge](https://github.com/NeverCookFirst/shadPS4-Seamless-Toypad-Bridge)
